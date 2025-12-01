@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Productivity Dashboard</title>
+
+  <script src="https://kit.fontawesome.com/5da508da44.js" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+  <script>
+    (function(){
+      const saved = localStorage.getItem('theme') || 'system';
+      document.documentElement.setAttribute('data-theme', saved);
+      window.__initialTheme = saved;
+    })();
+
+    window.dbReady = (async function(){
+      const SQL = await initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${f}` });
+      const db = new SQL.Database();
+      db.run("CREATE TABLE IF NOT EXISTS habits (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, createdAt INTEGER, orderIndex INTEGER);");
+      db.run("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);");
+
+      function rowsFromExec(res){
+        if(!res || res.length===0) return [];
+        const colCount = res[0].columns.length;
+        return (res[0].values||[]).map(r=>{ const obj={}; for(let i=0;i<colCount;i++) obj[res[0].columns[i]]=r[i]; return obj; });
+      }
+
+      window.dbAdd = async function(d){ const stmt = db.prepare("INSERT INTO habits (name, createdAt, orderIndex) VALUES (?,?,?)"); stmt.run([String(d.name||'').trim(), Number(d.createdAt||Date.now()), Number.isFinite(d.order)?d.order:0]); stmt.free(); return rowsFromExec(db.exec("SELECT last_insert_rowid() AS id"))[0]?.id||null; };
+      window.dbGetAll = async function(){ return rowsFromExec(db.exec("SELECT id,name,createdAt,orderIndex FROM habits ORDER BY orderIndex ASC, createdAt ASC")).map(r=>({id:Number(r.id),name:String(r.name),createdAt:Number(r.createdAt),order:Number(r.orderIndex)})); };
+      window.dbPut = async function(h){ const stmt = db.prepare("UPDATE habits SET name=?, orderIndex=? WHERE id=?"); stmt.run([String(h.name),Number.isFinite(h.order)?h.order:0,Number(h.id)]); stmt.free(); };
+      window.dbDelete = async function(id){ const stmt = db.prepare("DELETE FROM habits WHERE id=?"); stmt.run([Number(id)]); stmt.free(); };
+
+      window.dbSetSetting = async function(k,v){ const stmt = db.prepare("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)"); stmt.run([String(k),String(v)]); stmt.free(); };
+      window.dbGetSetting = async function(k){ return rowsFromExec(db.exec("SELECT value FROM settings WHERE key='"+String(k).replace(/'/g,"''")+"'"))[0]?.value||null; };
+
+      const persisted = await window.dbGetSetting('theme');
+      if(persisted){ document.documentElement.setAttribute('data-theme', persisted); localStorage.setItem('theme', persisted); } else { await window.dbSetSetting('theme', window.__initialTheme||'system'); }
+
+      return true;
+    })();
+
+    window.productivityApp = function(){
+      return {
+        newHabit:'', habits:[], showModal:false, modalId:null, editingHabitId:null, editHabitName:'',
+        theme:window.__initialTheme||'system',
+        themeOptions:[
+          {value:'light',label:'Light'},
+          {value:'dark',label:'Dark'},
+          {value:'solarized',label:'Solarized'},
+          {value:'sea',label:'Sea Blue'},
+          {value:'chrysanthemum',label:'Chrysanthemum Red'},
+          {value:'system',label:'System'}
+        ],
+
+        async loadAll(){ await window.dbReady; this.habits = await window.dbGetAll(); this.habits.forEach((h,i)=>{ if(!Number.isFinite(h.order)) h.order = h.createdAt||i; }); this.habits.sort((a,b)=>a.order-b.order); },
+        async addHabit(){ if(!this.newHabit.trim()) return; await window.dbReady; await window.dbAdd({name:this.newHabit.trim(),createdAt:Date.now(),order:this.habits.length}); this.newHabit=''; await this.loadAll(); },
+        startEdit(h){ this.editingHabitId=h.id; this.editHabitName=h.name; this.$nextTick(()=>{ document.querySelector('[data-id="'+h.id+'"] .edit-input')?.focus(); }); },
+        cancelEdit(){ this.editingHabitId=null; this.editHabitName=''; },
+        async saveEdit(id){ if(!this.editHabitName.trim()) return; const h=this.habits.find(x=>x.id===id); if(h){h.name=this.editHabitName.trim(); await window.dbPut(h);} this.cancelEdit(); await this.loadAll(); },
+        confirmDelete(id){ this.modalId=id; this.showModal=true; },
+        async deleteHabitConfirmed(){ if(this.modalId==null) return; await window.dbReady; await window.dbDelete(this.modalId); this.modalId=null; this.showModal=false; await this.reindexAndSave(); await this.loadAll(); },
+        async moveUp(id){ const i=this.habits.findIndex(h=>h.id===id); if(i<=0)return; const a=this.habits[i-1],c=this.habits[i]; [a.order,c.order]=[c.order,a.order]; await window.dbPut(a); await window.dbPut(c); await this.loadAll(); },
+        async moveDown(id){ const i=this.habits.findIndex(h=>h.id===id); if(i===-1||i>=this.habits.length-1)return; const b=this.habits[i+1],c=this.habits[i]; [b.order,c.order]=[c.order,b.order]; await window.dbPut(b); await window.dbPut(c); await this.loadAll(); },
+        async reindexAndSave(){ await window.dbReady; this.habits.sort((a,b)=>a.order-b.order); for(let i=0;i<this.habits.length;i++){ const h=this.habits[i]; if(h.order!==i){h.order=i; await window.dbPut(h);} } },
+        async applyThemeChoice(val){ 
+          if(val==='system'){ 
+            const mq=window.matchMedia('(prefers-color-scheme: dark)'); 
+            const r=mq.matches?'dark':'light'; 
+            document.documentElement.setAttribute('data-theme','system'); 
+            document.documentElement.setAttribute('data-theme-resolved',r); 
+            localStorage.setItem('theme','system'); 
+            await window.dbSetSetting('theme','system'); 
+          } else { 
+            document.documentElement.setAttribute('data-theme',val); 
+            document.documentElement.removeAttribute('data-theme-resolved'); 
+            localStorage.setItem('theme',val); 
+            await window.dbSetSetting('theme',val); 
+          } 
+        }
+      };
+    };
+  </script>
+
+  <style>
+    :root{--bg:#fdfdfd;--panel:#ffffff;--text:#1a1a1a;--muted:#6b7280;--accent:#01b753}
+    [data-theme="dark"]{--bg:#0f111a;--panel:#1c1f2a;--text:#e1e4e8;--muted:#9ca3af;--accent:#01b753}
+    [data-theme="solarized"]{--bg:#fdf6e3;--panel:#eee8d5;--text:#073642;--muted:#586e75;--accent:#b58900}
+    [data-theme="sea"]{--bg:#e0f7fa;--panel:#b2ebf2;--text:#004d40;--muted:#006064;--accent:#0097a7}
+    [data-theme="chrysanthemum"]{--bg:#fff0f0;--panel:#ffe5e5;--text:#4d0000;--muted:#990000;--accent:#d32f2f}
+    [data-theme="system"][data-theme-resolved="dark"]{--bg:#0f111a;--panel:#1c1f2a;--text:#e1e4e8;--muted:#9ca3af;--accent:#01b753}
+    [data-theme="system"][data-theme-resolved="light"]{--bg:#fdfdfd;--panel:#ffffff;--text:#1a1a1a;--muted:#6b7280;--accent:#01b753}
+
+    body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);padding:1.5rem;margin:0}
+    .container{max-width:768px;margin:0 auto;display:flex;flex-direction:column;gap:1.5rem}
+    h1{font-size:1.7rem;font-weight:bold;color:var(--accent);letter-spacing:1px;margin:0}
+    .card{padding:1.5rem;background:var(--panel);border-radius:1rem;box-shadow:0 10px 25px rgba(0,0,0,0.08);display:flex;flex-direction:column;gap:1rem}
+    .top-row{display:flex;justify-content:space-between;align-items:center;gap:1rem}
+    .input-group{display:flex;gap:0.5rem}
+    input{flex:1;padding:0.75rem;border-radius:0.5rem;border:1px solid rgba(0,0,0,0.1);background:var(--panel);color:var(--text)}
+    button{padding:0.65rem 1rem;border-radius:0.5rem;font-weight:600;cursor:pointer;border:1px solid transparent}
+    button.add{background-color:rgba(1,183,83,0.15);border-color:var(--accent);color:var(--accent)}
+    button.add:hover{background-color:rgba(1,183,83,0.25)}
+    .habit-list{display:flex;flex-direction:column;gap:0.75rem;margin-top:0.75rem}
+    .habit-card{display:flex;align-items:center;justify-content:space-between;padding:0.85rem;background:var(--panel);border-left:4px solid var(--accent);border-radius:8px;color:var(--text)}
+    .habit-left{display:flex;align-items:center;gap:0.75rem;flex:1}
+    .arrow-controls{display:flex;flex-direction:column;gap:0.12rem}
+    .arrow-controls i{cursor:pointer;color:var(--muted);font-size:0.95rem}
+    .edit-input{padding:0.45rem;border-radius:0.25rem;border:1px solid rgba(0,0,0,0.1);background:var(--panel);color:var(--text);flex:1}
+    .icon-btn{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;background:transparent;border:1px solid rgba(0,0,0,0.05);cursor:pointer}
+    .icon-btn .fa-edit{color:var(--accent)}
+    .icon-btn .fa-trash-alt{color:#e74c3c}
+    .theme-select{padding:0.45rem;border-radius:8px;border:1px solid rgba(0,0,0,0.1);background:var(--panel);color:var(--text)}
+    .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center}
+    .modal-content{padding:1.2rem;background:var(--panel);border-radius:8px;max-width:360px;width:90%;display:flex;flex-direction:column;gap:0.75rem;text-align:center}
+    .modal-buttons{display:flex;justify-content:center;gap:1rem;margin-top:6px}
+    .cancel-button{padding:0.5rem 0.9rem;border-radius:6px;background:#555;color:#fff;border:none;cursor:pointer}
+    .confirm-delete{padding:0.5rem 0.9rem;border-radius:6px;background:#c0392b;color:#fff;border:none;cursor:pointer}
+    @media (max-width:420px){h1{font-size:1.3rem}.icon-btn{width:34px;height:34px}}
+  </style>
+</head>
+<body>
+  <div x-data="productivityApp()" x-init="loadAll()" class="container">
+    <div class="card">
+      <div class="top-row">
+        <h1>Productivity Dashboard</h1>
+        <div style="display:flex;gap:0.75rem;align-items:center">
+          <label for="theme">Theme</label>
+          <select id="theme" class="theme-select" x-model="theme" @change="applyThemeChoice(theme)">
+            <template x-for="opt in themeOptions" :key="opt.value">
+              <option :value="opt.value" x-text="opt.label"></option>
+            </template>
+          </select>
+        </div>
+      </div>
+      <div class="input-group">
+        <input type="text" placeholder="Add new habit" x-model="newHabit" @keydown.enter="addHabit">
+        <button class="add" @click="addHabit">Add</button>
+      </div>
+      <div id="habit-list" class="habit-list">
+        <template x-for="habit in habits" :key="habit.id">
+          <div class="habit-card" :data-id="habit.id">
+            <div class="habit-left">
+              <div class="arrow-controls" title="Move">
+                <i class="fas fa-chevron-up" @click.prevent="moveUp(habit.id)"></i>
+                <i class="fas fa-chevron-down" @click.prevent="moveDown(habit.id)"></i>
+              </div>
+              <template x-if="editingHabitId===habit.id">
+                <input type="text" class="edit-input" x-model="editHabitName" @keydown.enter.prevent="saveEdit(habit.id)" @keydown.escape.prevent="cancelEdit()">
+              </template>
+              <template x-if="editingHabitId!==habit.id">
+                <span x-text="habit.name"></span>
+              </template>
+            </div>
+            <div style="display:flex;gap:0.5rem;align-items:center">
+              <button class="icon-btn" @click.prevent="editingHabitId===habit.id?saveEdit(habit.id):startEdit(habit)"><i class="fas fa-edit"></i></button>
+              <button class="icon-btn" @click.prevent="confirmDelete(habit.id)"><i class="fas fa-trash-alt"></i></button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+    <div class="modal-bg" x-show="showModal" x-transition.opacity style="display:none;" @click.self="showModal=false">
+      <div class="modal-content">
+        <p>Are you sure you want to delete this habit?</p>
+        <div class="modal-buttons">
+          <button class="cancel-button" @click="showModal=false">Cancel</button>
+          <button class="confirm-delete" @click="deleteHabitConfirmed()">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
