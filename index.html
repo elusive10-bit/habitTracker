@@ -123,7 +123,9 @@
 </head>
 <body>
   <div x-data="productivityApp()" x-init="loadAll()" class="container">
-    
+    <div class="card">
+      <a href="/" style="color: gray;">Go back to portfolio site</a>
+    </div>
     <div class="card">
       <div class="top-row">
         <h1>Productivity Dashboard</h1>
@@ -163,11 +165,6 @@
         </template>
       </div>
     </div>
-
-    <div class="card">
-      <a href="/">Go back to portfolio site</a>
-    </div>
-    
     <div class="modal-bg" x-show="showModal" x-transition.opacity style="display:none;" @click.self="showModal=false">
       <div class="modal-content">
         <p>Are you sure you want to delete this habit?</p>
